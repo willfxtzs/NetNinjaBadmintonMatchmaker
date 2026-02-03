@@ -1,7 +1,7 @@
 const CACHE_NAME = "badminton-cache-v1";
 const urlsToCache = [
   "/",
-  "/index.html"
+  "NetNinjaBadmintonMatchmaker/index.html"
 ];
 
 // Install event
