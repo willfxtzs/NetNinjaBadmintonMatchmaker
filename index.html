@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#1d1d1d">
   <meta charset="UTF-8">
   <title>Net Ninjas Badminton Matchmaker</title>
   <style>
@@ -261,6 +263,19 @@ function render() {
 }
 
 render();
+
+/* ========= make offline mode ========= */
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/service-worker.js')
+      .then(function(reg) {
+        console.log('Service worker registered.', reg);
+      })
+      .catch(function(err) {
+        console.log('Service worker registration failed: ', err);
+      });
+  }
+
 </script>
 
 </body>
