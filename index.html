@@ -470,6 +470,182 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('service-worker.js');
 }
 
+/* ========= TOUCH DRAG-AND-DROP (iOS Safari polyfill) ========= */
+
+(function () {
+  // Only wire up touch logic — desktop mouse drag events still handle themselves.
+
+  let touchDragPlayer = null;
+  let touchDragFromCourt = null;
+  let ghost = null;
+  let offsetX = 0, offsetY = 0;
+
+  function createGhost(text, x, y) {
+    ghost = document.createElement("div");
+    ghost.textContent = text;
+    ghost.style.cssText = [
+      "position:fixed",
+      "pointer-events:none",
+      "z-index:9999",
+      "background:#ddf",
+      "border:1px solid #333",
+      "padding:4px 10px",
+      "border-radius:4px",
+      "font-size:14px",
+      "opacity:0.85",
+      "white-space:nowrap",
+      "transform:translate(-50%,-50%)"
+    ].join(";");
+    ghost.style.left = x + "px";
+    ghost.style.top  = y + "px";
+    document.body.appendChild(ghost);
+  }
+
+  function moveGhost(x, y) {
+    if (!ghost) return;
+    ghost.style.left = x + "px";
+    ghost.style.top  = y + "px";
+  }
+
+  function removeGhost() {
+    if (ghost) { ghost.remove(); ghost = null; }
+  }
+
+  // Returns the drop-zone id (or court index) underneath a touch point.
+  function getDropTarget(x, y) {
+    // Temporarily hide ghost so elementFromPoint works through it
+    if (ghost) ghost.style.display = "none";
+    const el = document.elementFromPoint(x, y);
+    if (ghost) ghost.style.display = "";
+    if (!el) return null;
+
+    // Walk up the DOM to find a recognised drop target
+    let node = el;
+    while (node && node !== document.body) {
+      const id = node.id;
+      if (id === "queue")         return { type: "queue" };
+      if (id === "beginnerQueue") return { type: "beginner" };
+      if (id === "advanceQueue")  return { type: "advance" };
+
+      // Court drop zone — look for data attribute set during render
+      if (node.dataset && node.dataset.courtIndex !== undefined) {
+        return { type: "court", index: parseInt(node.dataset.courtIndex, 10) };
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  // Attach touch listeners whenever render() creates draggable elements.
+  // We use event delegation on document to survive re-renders.
+  document.addEventListener("touchstart", function (e) {
+    const el = e.target.closest(".draggable");
+    if (!el) return;
+
+    // Prevent scroll hijack only while we confirm a drag is starting.
+    // We don't call preventDefault here yet so iOS doesn't block tap-scrolling.
+
+    const touch = e.touches[0];
+    const rect = el.getBoundingClientRect();
+    offsetX = touch.clientX - rect.left;
+    offsetY = touch.clientY - rect.top;
+
+    // Read the player name and source court from data attributes set in render()
+    touchDragPlayer     = el.dataset.player      || null;
+    touchDragFromCourt  = el.dataset.courtIndex !== undefined
+                          ? parseInt(el.dataset.courtIndex, 10)
+                          : null;
+
+    if (!touchDragPlayer) return;
+
+    createGhost(touchDragPlayer, touch.clientX, touch.clientY);
+
+    // Set global drag state so the existing drop handlers can read it
+    draggedPlayer    = touchDragPlayer;
+    draggedFromCourt = touchDragFromCourt;
+
+  }, { passive: true });
+
+  document.addEventListener("touchmove", function (e) {
+    if (!touchDragPlayer) return;
+    e.preventDefault(); // now safe to block scroll since we're dragging
+    const touch = e.touches[0];
+    moveGhost(touch.clientX, touch.clientY);
+  }, { passive: false });
+
+  document.addEventListener("touchend", function (e) {
+    if (!touchDragPlayer) { removeGhost(); return; }
+
+    const touch = e.changedTouches[0];
+    const target = getDropTarget(touch.clientX, touch.clientY);
+
+    removeGhost();
+
+    if (target) {
+      // Re-sync globals (they should already be set, but be safe)
+      draggedPlayer    = touchDragPlayer;
+      draggedFromCourt = touchDragFromCourt;
+
+      const fakeEvent = { preventDefault: () => {} };
+
+      if (target.type === "queue")    dropToQueue(fakeEvent);
+      else if (target.type === "beginner") dropToBeginner(fakeEvent);
+      else if (target.type === "advance")  dropToAdvance(fakeEvent);
+      else if (target.type === "court")    dropToCourt(fakeEvent, target.index);
+      else {
+        draggedPlayer = draggedFromCourt = null;
+      }
+    } else {
+      draggedPlayer = draggedFromCourt = null;
+    }
+
+    touchDragPlayer    = null;
+    touchDragFromCourt = null;
+  }, { passive: true });
+
+  document.addEventListener("touchcancel", function () {
+    removeGhost();
+    touchDragPlayer = draggedPlayer = null;
+    touchDragFromCourt = draggedFromCourt = null;
+  }, { passive: true });
+
+  // --- Patch render() to stamp data attributes on draggable elements ---
+  // We wrap the original render so touch listeners can read player + court info.
+  const _originalRender = render;
+  render = function () {
+    _originalRender();
+
+    // Queue players
+    document.querySelectorAll("#queue .draggable").forEach(el => {
+      el.dataset.player = el.childNodes[0].textContent.trim();
+    });
+
+    // Beginner queue players
+    document.querySelectorAll("#beginnerQueue .draggable").forEach(el => {
+      el.dataset.player = el.textContent.trim();
+    });
+
+    // Advance queue players
+    document.querySelectorAll("#advanceQueue .draggable").forEach(el => {
+      el.dataset.player = el.textContent.trim();
+    });
+
+    // Court players — also stamp the court's drop zone with its index
+    document.querySelectorAll("#courts .court").forEach((courtEl, i) => {
+      // Mark the whole court div so getDropTarget can find it
+      courtEl.dataset.courtIndex = i;
+      // Mark each player chip inside the court
+      courtEl.querySelectorAll(".draggable").forEach(el => {
+        el.dataset.player     = el.childNodes[0].textContent.trim();
+        el.dataset.courtIndex = i;
+      });
+    });
+  };
+
+  // Run once immediately so the initial render gets patched too.
+  render();
+})();
+
 </script>
 
 </body>
