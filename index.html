@@ -94,6 +94,10 @@ let courts = [
   { mode: "2v2", level: "default", players: [] }
 ];
 
+// Tracks players who sat out the PREVIOUS random for each court (by court index)
+// Structure: { [courtIndex]: string[] }
+let sittingOut = {};
+
 let draggedPlayer = null;
 let draggedFromCourt = null;
 
@@ -114,6 +118,12 @@ function returnPlayerToLevel(player, level) {
   } else {
     if (!queue.includes(player)) queue.push(player);
   }
+}
+
+function getSourceQueue(level) {
+  if (level === "beginner") return beginnerQueue;
+  if (level === "advance") return advanceQueue;
+  return queue;
 }
 
 /* ========= ACTIONS ========= */
@@ -149,31 +159,109 @@ function removeCourt() {
 
 function setMode(index, mode) {
   const court = courts[index];
+  // Return current players to their queue before changing mode
   court.players.forEach(p => returnPlayerToLevel(p, court.level));
   court.players = [];
   court.mode = mode;
+  // Clear sitting-out memory for this court since lineup is reset
+  delete sittingOut[index];
   render();
 }
 
-function setLevel(index, level) {
-  courts[index].level = level;
+// FIX 1: When the level changes, return existing court players to the OLD level's queue,
+// then update the level. Players are NOT wiped — they go back to the correct queue.
+function setLevel(index, newLevel) {
+  const court = courts[index];
+  const oldLevel = court.level;
+
+  if (oldLevel !== newLevel) {
+    // Return players currently on the court to the OLD level's queue
+    court.players.forEach(p => returnPlayerToLevel(p, oldLevel));
+    court.players = [];
+    // Clear sitting-out memory since context changed
+    delete sittingOut[index];
+  }
+
+  court.level = newLevel;
   render();
 }
 
+// FIX 2: Smart random — prioritise players who sat out last match,
+// then fill remaining spots from previous-match players (with occasional mixing).
 function randomAssign(index) {
   const court = courts[index];
   const needed = court.mode === "1v1" ? 2 : 4;
+  const source = getSourceQueue(court.level);
 
+  // Players currently on the court (previous match participants)
+  const prevPlayers = [...court.players];
+
+  // Return everyone on the court back to their queue before reassigning
   court.players.forEach(p => returnPlayerToLevel(p, court.level));
   court.players = [];
 
-  let source;
-  if (court.level === "beginner") source = beginnerQueue;
-  else if (court.level === "advance") source = advanceQueue;
-  else source = queue;
+  // Players who sat out last round for THIS court
+  const waitingPlayers = (sittingOut[index] || []).filter(p => source.includes(p));
 
-  shuffle(source);
-  court.players = source.splice(0, needed);
+  // --- Build the new lineup ---
+  let chosen = [];
+
+  if (waitingPlayers.length >= needed) {
+    // Enough waiting players to fill the court — pick `needed` of them randomly
+    const waitingCopy = [...waitingPlayers];
+    shuffle(waitingCopy);
+    chosen = waitingCopy.slice(0, needed);
+  } else if (waitingPlayers.length > 0) {
+    // Start with all waiting players, then fill from a mix of prev players + others in queue
+    chosen = [...waitingPlayers];
+    const stillNeeded = needed - chosen.length;
+
+    // Pool: prev match players still in queue (excluding waiting players already chosen)
+    const prevInQueue = prevPlayers.filter(p => source.includes(p) && !chosen.includes(p));
+
+    // Occasionally rotate 1 prev-match player out in favour of a fresh queue player
+    // to prevent the same group from always playing together.
+    // "Occasionally" = ~30% chance per extra slot when there are fresh players available
+    const freshInQueue = source.filter(p => !prevInQueue.includes(p) && !chosen.includes(p));
+
+    let pool = [...prevInQueue];
+    if (freshInQueue.length > 0 && pool.length > 0 && stillNeeded >= 2) {
+      // Randomly decide to swap one prev-match player for a fresh one
+      if (Math.random() < 0.35) {
+        // Remove one random prev-match player from pool (they go back to queue naturally)
+        const swapOutIdx = Math.floor(Math.random() * pool.length);
+        pool.splice(swapOutIdx, 1);
+        // Add one random fresh player
+        shuffle(freshInQueue);
+        pool.push(freshInQueue[0]);
+      }
+    }
+
+    // If pool is still short, top up with any remaining source players
+    const fallback = source.filter(p => !chosen.includes(p) && !pool.includes(p));
+    shuffle(fallback);
+    const fullPool = [...pool, ...fallback];
+    shuffle(fullPool);
+
+    chosen = [...chosen, ...fullPool.slice(0, stillNeeded)];
+  } else {
+    // No sitting-out memory (first random or cleared) — fully random from source
+    const sourceCopy = [...source];
+    shuffle(sourceCopy);
+    chosen = sourceCopy.slice(0, needed);
+  }
+
+  // Remove chosen players from the source queue
+  chosen.forEach(p => {
+    const idx = source.indexOf(p);
+    if (idx !== -1) source.splice(idx, 1);
+  });
+
+  court.players = chosen;
+
+  // Update sitting-out: players who were in the prev match but NOT chosen this round
+  // These are the priority players for the NEXT random click
+  sittingOut[index] = prevPlayers.filter(p => !chosen.includes(p) && source.includes(p));
 
   render();
 }
@@ -187,15 +275,18 @@ function removePlayerFromCourt(courtIndex, playerIndex) {
 
 function clearCourt(index) {
   const court = courts[index];
+  // FIX 1 (clear court): return players to their queue instead of wiping them
   court.players.forEach(p => returnPlayerToLevel(p, court.level));
   court.players = [];
+  delete sittingOut[index];
   render();
 }
 
 function clearAllCourts() {
-  courts.forEach(court => {
+  courts.forEach((court, i) => {
     court.players.forEach(p => returnPlayerToLevel(p, court.level));
     court.players = [];
+    delete sittingOut[i];
   });
   render();
 }
@@ -233,8 +324,7 @@ function dropToQueue(e) {
 
   if (draggedFromCourt !== null) {
     const court = courts[draggedFromCourt];
-    court.players =
-      court.players.filter(p => p !== draggedPlayer);
+    court.players = court.players.filter(p => p !== draggedPlayer);
     returnPlayerToLevel(draggedPlayer, "default");
   }
 
@@ -340,6 +430,10 @@ function render() {
     div.ondragover = allowDrop;
     div.ondrop = e => dropToCourt(e, i);
 
+    const waitingLabel = sittingOut[i] && sittingOut[i].length
+      ? `<small style="color:#888">⏳ Priority next: ${sittingOut[i].join(", ")}</small><br>`
+      : "";
+
     div.innerHTML = `
       <strong>Court ${i + 1}</strong><br>
       Mode:
@@ -355,6 +449,7 @@ function render() {
       </select>
       <button onclick="randomAssign(${i})">Random</button>
       <button onclick="clearCourt(${i})">Clear Court</button>
+      <br>${waitingLabel}
       <div class="dropzone">
         ${court.players.map((p, j) =>
           `<div class="player draggable" draggable="true"
